@@ -4,7 +4,7 @@
 
 import argparse
 import sys
-from psl_class import ProSafeLinux
+from psl_class import ProSafeLinux, default_interface
 import psl_typ
 
 # pylint: disable=W0613
@@ -18,7 +18,7 @@ def discover(args, switch):
     for data in switch.discover():
         found = True
         for entry in data.keys():
-            print(entry.get_name() + ': ' + data[entry])
+            print(entry.get_name() + ': ' + str(data[entry]))
         print("")
 
     if not found:
@@ -148,9 +148,9 @@ def main():
 
     switch = ProSafeLinux()
     parser = argparse.ArgumentParser(
-        description='Manage Netgear ProSafe Plus switches under Linux.')
-    parser.add_argument("--interface", nargs=1, help="Interface",
-        default=["eth0"])
+        description='Manage Netgear ProSafe Plus switches under Linux and macOS.')
+    parser.add_argument("--interface", nargs=1,
+        help="Interface (default: the one carrying the default route)")
     parser.add_argument("--debug", help="Debug output", action='store_true')
     parser.add_argument("--timeout", help="set timeout for switch commands",
                 default="0.1", type=float)
@@ -208,12 +208,22 @@ def main():
                 action=action)
 
     args = parser.parse_args()
-    interface = args.interface[0]
+    if args.operation is None:
+        parser.print_help()
+        return
+    if args.interface is None:
+        interface = default_interface()
+        if interface is None:
+            print("No usable network interface found, use --interface")
+            return
+    else:
+        interface = args.interface[0]
 
     switch.set_timeout(args.timeout)
 
     if not switch.bind(interface):
-        print("Interface has no addresses, cannot talk to switch")
+        print("Interface %s has no IPv4 or hardware address, "
+              "cannot talk to switch" % interface)
         return
 
     if (args.debug):
@@ -224,6 +234,7 @@ def main():
     else:
         print("ERROR: operation not found!")
 
-main()
+if __name__ == "__main__":
+    main()
 
 # vim:filetype=python:foldmethod=marker:autoindent:expandtab:tabstop=4

@@ -9,37 +9,136 @@ import random
 import struct
 import socket
 import select
-import fcntl
+import sys
+import os
+import ctypes
 import psl_typ
 import inspect
 import errno
 
 
-def get_hw_addr(ifname):
-    "gives the hardware (mac) address of an interface (eth0,eth1..)"
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    ifname = ifname.encode('ascii')  # struct.pack requires bytes in Python 3
-    info = fcntl.ioctl(sock.fileno(), 0x8927, struct.pack('256s', ifname[:15]))
-    if type(info) is str:
-        return ''.join(['%02x:' % ord(char) for char in info[18:24]])[:-1]
+class _Sockaddr(ctypes.Structure):
+    "generic struct sockaddr; BSD/macOS have a leading length byte"
+    if sys.platform.startswith("linux"):
+        _fields_ = [("sa_family", ctypes.c_uint16),
+                    ("sa_data", ctypes.c_uint8 * 14)]
     else:
-        # Python 3 returns a list of bytes from ioctl, no need for ord()
-        return ''.join(['%02x:' % char for char in info[18:24]])[:-1]
+        _fields_ = [("sa_len", ctypes.c_uint8),
+                    ("sa_family", ctypes.c_uint8),
+                    ("sa_data", ctypes.c_uint8 * 14)]
+
+
+class _Ifaddrs(ctypes.Structure):
+    "struct ifaddrs, identical layout on Linux and BSD/macOS"
+    pass
+
+_Ifaddrs._fields_ = [("ifa_next", ctypes.POINTER(_Ifaddrs)),
+                     ("ifa_name", ctypes.c_char_p),
+                     ("ifa_flags", ctypes.c_uint),
+                     ("ifa_addr", ctypes.POINTER(_Sockaddr)),
+                     ("ifa_netmask", ctypes.POINTER(_Sockaddr)),
+                     ("ifa_dstaddr", ctypes.POINTER(_Sockaddr)),
+                     ("ifa_data", ctypes.c_void_p)]
+
+# AF_PACKET (Linux) / AF_LINK (BSD, macOS) carry the hardware address
+_AF_PACKET = getattr(socket, "AF_PACKET", 17)
+_AF_LINK = getattr(socket, "AF_LINK", 18)
+_IFF_UP = 0x1
+_IFF_LOOPBACK = 0x8
+
+
+def get_interfaces():
+    """returns {ifname: {"mac": str or None, "ipv4": [str], "flags": int}}
+    using getifaddrs(3), which works on Linux and macOS alike"""
+    # dlopen(NULL): libc symbols are already loaded into the process
+    libc = ctypes.CDLL(None, use_errno=True)
+    ifap = ctypes.POINTER(_Ifaddrs)()
+    if libc.getifaddrs(ctypes.byref(ifap)) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    result = {}
+    try:
+        ifa = ifap
+        while ifa:
+            entry = ifa.contents
+            name = entry.ifa_name.decode()
+            info = result.setdefault(name, {"mac": None, "ipv4": [],
+                                            "flags": entry.ifa_flags})
+            if entry.ifa_addr:
+                addr = entry.ifa_addr.contents
+                if hasattr(addr, "sa_len"):
+                    rawlen = max(addr.sa_len, ctypes.sizeof(_Sockaddr))
+                elif addr.sa_family == _AF_PACKET:
+                    rawlen = 20  # sizeof(struct sockaddr_ll)
+                else:
+                    rawlen = ctypes.sizeof(_Sockaddr)
+                raw = ctypes.string_at(entry.ifa_addr, rawlen)
+                if addr.sa_family == socket.AF_INET:
+                    # sockaddr_in: the address is at offset 4 on both
+                    info["ipv4"].append(socket.inet_ntoa(raw[4:8]))
+                elif addr.sa_family == _AF_PACKET and \
+                        sys.platform.startswith("linux"):
+                    # sockaddr_ll: halen at 11, addr at 12
+                    halen = raw[11]
+                    if halen == 6:
+                        info["mac"] = raw[12:18]
+                elif addr.sa_family == _AF_LINK and \
+                        not sys.platform.startswith("linux"):
+                    # sockaddr_dl: nlen at 5, alen at 6, data at 8
+                    nlen, alen = raw[5], raw[6]
+                    if alen == 6:
+                        info["mac"] = raw[8 + nlen:8 + nlen + 6]
+            ifa = entry.ifa_next
+    finally:
+        libc.freeifaddrs(ifap)
+    for info in result.values():
+        if info["mac"] is not None:
+            info["mac"] = ":".join("%02x" % b for b in info["mac"])
+    return result
+
+
+def get_hw_addr(ifname):
+    "gives the hardware (mac) address of an interface (eth0,en0..)"
+    info = get_interfaces().get(ifname)
+    if info is None or info["mac"] is None:
+        return None
+    return info["mac"]
+
 
 def get_ip_address(ifname):
     "returns the first ip address of an interface"
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    ifname = ifname.encode('ascii')  # struct.pack requires bytes in Python 3
+    info = get_interfaces().get(ifname)
+    if info is None or not info["ipv4"]:
+        return None
+    return info["ipv4"][0]
+
+
+def default_interface():
+    """guess the interface to use: the one carrying the default route,
+    otherwise the first non-loopback interface with an IPv4 address"""
+    interfaces = get_interfaces()
+    local_ip = None
     try:
-        # 0x8915 = SIOCGIFADDR
-        addr = socket.inet_ntoa(fcntl.ioctl(sock.fileno(), 0x8915,
-                                            struct.pack('256s',
-                                            ifname[:15]))[20:24])
-        return addr
-    except IOError as err:
-        if err.errno == errno.EADDRNOTAVAIL:
-            return None
-        raise
+        # connecting a UDP socket sends nothing, it only picks a route
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("192.0.2.1", 9))
+            local_ip = sock.getsockname()[0]
+        finally:
+            sock.close()
+    except OSError:
+        pass
+    candidates = []
+    for name, info in interfaces.items():
+        if (info["flags"] & _IFF_LOOPBACK or not info["flags"] & _IFF_UP
+                or not info["ipv4"] or info["mac"] is None):
+            continue
+        if local_ip in info["ipv4"]:
+            return name
+        candidates.append(name)
+    if candidates:
+        return sorted(candidates)[0]
+    return None
 
 def pack_mac(value):
     "packs the hardware address (mac) to the internal representation"
@@ -49,12 +148,12 @@ def pack_mac(value):
                                   value[9:11] + value[12:14] + value[15:17])
     if (len(value) == 12):
         return binascii.unhexlify(value)
-    raise "unknown mac format=" + value
+    raise ValueError("unknown mac format=" + value.decode())
 
 
 def unpack_mac(value):
     "unpack an internal representation to a hardware address"
-    mac = binascii.hexlify(value)
+    mac = binascii.hexlify(value).decode()
     return (mac[0:2] + ":" + mac[2:4] + ":" + mac[4:6] + ":" + mac[6:8] +
             ":" + mac[8:10] + ":" + mac[10:12])
 
@@ -151,11 +250,11 @@ class ProSafeLinux:
         self.srcmac = None
         self.ssocket = None
         self.brsocket = None
-        self.ursocket = None
         self.timeout=2
 
         # i still see no win in randomizing the starting sequence...
         self.seq = random.randint(100, 2000)
+        self.last_seq = None
         self.debug = False
         self.mac_cache = {}
         self.cmd_by_id = {}
@@ -177,28 +276,50 @@ class ProSafeLinux:
         self.myhost = get_ip_address(interface)
         if not self.myhost:
             return False
-        self.srcmac = pack_mac(get_hw_addr(interface))
+        hwaddr = get_hw_addr(interface)
+        if not hwaddr:
+            return False
+        self.srcmac = pack_mac(hwaddr)
 
-        # send socket
-        self.ssocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.ssocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.ssocket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # send socket, also receives replies sent by unicast (newer firmware)
+        self.ssocket = self._udp_socket()
         self.ssocket.bind((self.myhost, self.RECPORT))
+        self._bind_to_device(self.ssocket, interface)
 
-        # broadcast receive socket
-        self.brsocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.brsocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # self.brsocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        self.brsocket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.brsocket.bind(("255.255.255.255", self.RECPORT))
-
-        # unicast receive socket
-        self.ursocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.ursocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # self.ursocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        self.ursocket.bind((self.myhost, self.RECPORT))
+        # broadcast receive socket (older firmware replies to 255.255.255.255).
+        # Binding to the wildcard address works on Linux and macOS; the more
+        # specific bind above still wins for unicast replies.
+        self.brsocket = self._udp_socket()
+        self.brsocket.bind(("", self.RECPORT))
 
         return True
+
+    @staticmethod
+    def _udp_socket():
+        "UDP socket that can share RECPORT with the other one"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            # needed on macOS to bind the same port twice
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        return sock
+
+    @staticmethod
+    def _bind_to_device(sock, interface):
+        """best effort: send broadcasts out of the chosen interface even when
+        it does not carry the default route (e.g. a USB adapter on a Mac)"""
+        try:
+            if hasattr(socket, "SO_BINDTODEVICE"):
+                # Linux; may need CAP_NET_RAW on older kernels
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
+                                interface.encode())
+            elif sys.platform == "darwin":
+                ip_bound_if = getattr(socket, "IP_BOUND_IF", 25)
+                sock.setsockopt(socket.IPPROTO_IP, ip_bound_if,
+                                socket.if_nametoindex(interface))
+        except OSError:
+            pass
 
     def get_query_cmds(self):
         "return all commands which can be used in a query"
@@ -235,36 +356,52 @@ class ProSafeLinux:
         "set debugging"
         self.debug = True
 
-    def recv(self, maxlen=8192, sock=None):
-        "receive a packet from the switch"
-        socks = [sock];
+    def is_reply(self, message, seq):
+        "check that a packet answers the request sent with sequence seq"
+        return (len(message) >= 32 and message[24:28] == b"NSDP" and
+                message[8:14] == self.srcmac and
+                struct.unpack(">H", message[22:24])[0] == seq & 0xffff)
+
+    def recv(self, maxlen=8192, sock=None, seq=None):
+        """receive a packet from the switch; with seq, skip packets which do
+        not answer that request (duplicates, late replies, other hosts)"""
+        socks = [sock]
         if sock is None:
-            socks = [self.brsocket, self.ursocket]
+            socks = [self.ssocket, self.brsocket]
 
-        try:
-            rsocks,_,_ = select.select(socks, [], [], self.timeout)
-            if rsocks == []:
+        deadline = time.monotonic() + self.timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return (None, None)
+            try:
+                rsocks,_,_ = select.select(socks, [], [], remaining)
+                if rsocks == []:
+                    return (None, None)
 
-            message, address = rsocks[0].recvfrom(maxlen)
+                message, address = rsocks[0].recvfrom(maxlen)
 
-        except socket.timeout:
-            return (None, None)
-        except socket.error as error:
-            # according to the Python documentation this error
-            # is system-specifc; this works on Linux
-            if error.errno == errno.EAGAIN:
+            except socket.timeout:
                 return (None, None)
-            raise
-        if self.debug:
-            message_hex = binascii.hexlify(message).decode()
-            print("recv=" + message_hex)
-        return (message, address)
+            except socket.error as error:
+                # according to the Python documentation this error
+                # is system-specifc; this works on Linux
+                if error.errno == errno.EAGAIN:
+                    return (None, None)
+                raise
+            if self.debug:
+                message_hex = binascii.hexlify(message).decode()
+                print("recv=" + message_hex)
+            if seq is not None and not self.is_reply(message, seq):
+                if self.debug:
+                    print("ignoring packet, not a reply to seq %d" % seq)
+                continue
+            return (message, address)
 
-    def recv_all(self):
+    def recv_all(self, seq=None):
         "receive all pending packets"
         while True:
-            (message, address) = self.recv()
+            (message, address) = self.recv(seq=seq)
             if message is None:
                 return
             yield (message, address)
@@ -334,6 +471,7 @@ class ProSafeLinux:
             data_hex = binascii.hexlify(data).decode()
             print("send to ip " + host + " data = " + data_hex)
         self.ssocket.sendto(data, (host, port))
+        self.last_seq = self.seq
         self.seq += 1
 
     def baseudp(self, ctype, destmac):
@@ -399,10 +537,10 @@ class ProSafeLinux:
     def query(self, cmd_arr, mac, with_address=False, use_ip_func=True):
         "get some values from the switch, but do not change them"
         # translate non-list to list
-        if type(cmd_arr).__name__ != 'tupe' and type(cmd_arr).__name__ != 'list':
+        if not isinstance(cmd_arr, (tuple, list)):
             cmd_arr = (cmd_arr, )
         self.send_query(cmd_arr, mac, use_ip_func)
-        message, address = self.recv()
+        message, address = self.recv(seq=self.last_seq)
         if with_address:
             return (self.parse_data(message), address)
         else:
@@ -411,10 +549,10 @@ class ProSafeLinux:
     def queryall(self, cmd_arr, mac, with_address=False, use_ip_func=True):
         "get some values from the switch, but do not change them"
         # translate non-list to list
-        if type(cmd_arr).__name__ != 'tupe' and type(cmd_arr).__name__ != 'list':
+        if not isinstance(cmd_arr, (tuple, list)):
             cmd_arr = (cmd_arr, )
         self.send_query(cmd_arr, mac, use_ip_func)
-        for message, address in self.recv_all():
+        for message, address in self.recv_all(seq=self.last_seq):
             if with_address:
                 yield (self.parse_data(message), address)
             else:
@@ -467,10 +605,11 @@ class ProSafeLinux:
         data = header + data
 
         self.send(ipadr, self.SENDPORT, data)
-        message, address = self.recv()
+        seq = self.last_seq
+        message, address = self.recv(seq=seq)
         while message == None and transmit_counter < 3:
             time.sleep(1)
-            message, address = self.recv()
+            message, address = self.recv(seq=seq)
             transmit_counter += 1
         if message == None:
             return { 'error' : 'no result received within 3 seconds' }
@@ -613,7 +752,7 @@ class ProSafeLinux:
                     _hashpass[idx] ^= ord(password[i])
 
                 _hashpass = struct.pack(">BBBB", *_hashpass)
-                data = self.addudp(self.CMD_HASH, binascii.hexlify(_hashpass))
+                data = self.addudp(self.CMD_PASSWORD_HASH, binascii.hexlify(_hashpass))
             else:
 
                 _hashpass += _hashpass;
@@ -647,9 +786,18 @@ class ProSafeLinux:
                    self.CMD_MAC,
                    self.CMD_DHCP,
                    self.CMD_IP]
+        seen = set()
         for message in self.queryall(query_arr, None):
-            if message != False:
-                self.mac_cache[message[self.CMD_MAC]] = message[self.CMD_IP]
+            if not message or "error" in message:
+                continue
+            mac = message.get(self.CMD_MAC)
+            # the same reply can arrive more than once (several sockets
+            # or interfaces), only report each switch once
+            if mac in seen:
+                continue
+            seen.add(mac)
+            if mac is not None and self.CMD_IP in message:
+                self.mac_cache[mac] = message[self.CMD_IP]
             yield message
 
     def verify_data(self, datadict):

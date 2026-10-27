@@ -232,7 +232,7 @@ class PslTypMac(PslTyp):
                                       val[9:11] + val[12:14] + val[15:17])
         if (len(val) == 12):
             return binascii.unhexlify(val)
-        raise "unkown mac format=" + val
+        raise ValueError("unknown mac format=" + val)
 
     def unpack_py(self, value):
         mac = binascii.hexlify(value)

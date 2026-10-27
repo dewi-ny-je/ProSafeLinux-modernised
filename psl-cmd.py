@@ -3,7 +3,7 @@
 #
 
 import cmd
-from psl_class import ProSafeLinux
+from psl_class import ProSafeLinux, default_interface
 
 class NetgearCMD(cmd.Cmd): # {{{
     switch = ProSafeLinux()
@@ -31,12 +31,15 @@ class NetgearCMD(cmd.Cmd): # {{{
         Arguments: interface'''
         iface = self.__splitLine(1,line)
         if iface == None:
-            iface = 'eth0'
-        self.switch.bind(iface)
-        data = self.switch.discover()
-        self.discovereddata = data
-        for entry in data.keys():
-            print(entry.get_name() + ': ' + data[entry])
+            iface = default_interface()
+        if iface == None or not self.switch.bind(iface):
+            print('Cannot use interface %s' % iface)
+            return False
+        self.discovereddata = list(self.switch.discover())
+        for data in self.discovereddata:
+            for entry in data.keys():
+                print(entry.get_name() + ': ' + str(data[entry]))
+            print('')
     # }}}
 
     def do_selectSwitch(self, line): # {{{
@@ -45,13 +48,13 @@ class NetgearCMD(cmd.Cmd): # {{{
         if switchip == None:
             print('Please give a IP')
             return False
-        else:
-            if switchip == self.discovereddata[self.switch.CMD_IP]:
-                self.selectedswitch = { "ip" : self.discovereddata[self.switch.CMD_IP],
-                                        "mac" : self.discovereddata[self.switch.CMD_MAC] }
-            else:
-                print('No valid ip given...')
+        for data in self.discovereddata:
+            if data.get(self.switch.CMD_IP) == switchip:
+                self.selectedswitch = { "ip" : data[self.switch.CMD_IP],
+                                        "mac" : data[self.switch.CMD_MAC] }
                 return False
+        print('No valid ip given...')
+        return False
     # }}}
 
     def do_query(self, line): # {{{
@@ -59,7 +62,7 @@ class NetgearCMD(cmd.Cmd): # {{{
         If no query command is given it prints out the possibilities"""
         querycmds = self.switch.get_query_cmds()
         query = self.__splitLine(1,line)
-        if len(query) == 0:
+        if not query:
             print("you have the following values to query:")
             for cmd in list(querycmds):
                 print("- " + str(cmd.get_name()))
@@ -88,7 +91,7 @@ class NetgearCMD(cmd.Cmd): # {{{
             print('Please give a new password')
             return False
         else:
-            self.switch.passwd_exploit(self.selectedswitch['mac'], newpass, 'transfunc')
+            self.switch.passwd_exploit(self.selectedswitch['mac'], newpass)
     # }}}
 
 # }}}
