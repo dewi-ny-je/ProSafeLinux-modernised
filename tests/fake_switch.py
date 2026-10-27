@@ -3,6 +3,8 @@
 
 usage: fake_switch.py IP [unicast|broadcast] [ENCTYPE] [BROADCAST_ADDR]
 
+ENCTYPE -1 behaves like old firmware that rejects the encryption type TLV.
+
 Answers queries for a few fields and acknowledges every set request,
 printing what it received on stdout.  IP is the address it reports
 for itself (use the address of the host it runs on).
@@ -23,7 +25,7 @@ VALUES = {
     0x0006: socket.inet_aton(IP),
     0x000b: b"\x01",
     0x000d: b"V2.06.24EN",
-    0x0014: struct.pack(">I", ENC),
+    0x0014: struct.pack(">I", max(ENC, 0)),
     0x0017: bytes.fromhex("01020304"),
     0x6000: b"\x08",
     0x7800: b"\x01" + b"4XB12345A0001" + b"\x00" * 7,
@@ -38,17 +40,20 @@ while True:
     ctype = struct.unpack(">H", pkt[0:2])[0]
     if pkt[14:20] not in (MAC, b"\0" * 6):
         continue
-    pos, tlvs, seen = 32, b"", []
+    pos, tlvs, seen, status = 32, b"", [], b"\0" * 6
     while pos + 4 <= len(pkt):
         cid, length = struct.unpack(">HH", pkt[pos:pos + 4])
         seen.append("%04x=%s" % (cid, pkt[pos + 4:pos + 4 + length].hex()))
         pos += 4 + length
         if cid == 0xffff:
             break
-        if ctype == 0x0101 and cid in VALUES:
+        if ctype == 0x0101 and cid == 0x0014 and ENC < 0:
+            # status 3 (TLV not supported) for command 0x0014
+            status = struct.pack(">BBH", 3, 0, 0x0014) + b"\0" * 2
+        elif ctype == 0x0101 and cid in VALUES:
             tlvs += struct.pack(">HH", cid, len(VALUES[cid])) + VALUES[cid]
     print("%04x %s" % (ctype, " ".join(seen)), flush=True)
-    header = (struct.pack(">H", ctype + 1) + b"\0" * 6 + pkt[8:14] + MAC +
+    header = (struct.pack(">H", ctype + 1) + status + pkt[8:14] + MAC +
               pkt[20:32])
     if MODE == "unicast":
         target = (addr[0], 63321)

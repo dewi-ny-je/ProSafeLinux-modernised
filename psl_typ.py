@@ -150,7 +150,7 @@ class PslTypBoolean(PslTyp):
         return (numval == 0x01)
 
     def pack_cmd(self, value):
-        return self.pack_py(value.lowercase == "on")
+        return self.pack_py(value.lower() == "on")
 
     def unpack_cmd(self, value):
         if (self.unpack_py(value)):
@@ -171,6 +171,9 @@ class PslTypBoolean(PslTyp):
 class PslTypFiltering(PslTyp):
     " Broadcast filtering, like a boolean but 0x00 and 0x03"
     def pack_py(self, value):
+        if isinstance(value, str):
+            # the command line passes "on"/"off"
+            value = (value.lower() == "on")
         if (value):
             return struct.pack(">b", 0x03)
         else:
@@ -181,7 +184,7 @@ class PslTypFiltering(PslTyp):
         return (numval == 0x03)
 
     def pack_cmd(self, value):
-        return self.pack_py(value.lowercase == "on")
+        return self.pack_py(value.lower() == "on")
 
     def unpack_cmd(self, value):
         if (self.unpack_py(value)):
@@ -429,6 +432,7 @@ class PslTypAdminPortStatus(PslTyp):
 
     string_to_speed = {
         "DISABLE":SPEED_DISABLE,
+        "NONE":SPEED_DISABLE,
         "AUTO":SPEED_AUTO,
         "10MH":SPEED_10MH,
         "10M":SPEED_10MF,
@@ -653,6 +657,10 @@ class PslTypVlanId(PslTyp):
                  8: 0x01
                  }
 
+    # 8-port default until set_total_ports() is told the real count
+    total_ports = 8
+    num_port_bytes = 1
+
     def set_total_ports(self, total_ports):
         # Calculate number of bytes required to store bitmap of all ports
         self.total_ports = total_ports
@@ -681,19 +689,17 @@ class PslTypVlanId(PslTyp):
         port_list = [0] * self.num_port_bytes
 
         if ports == "":
-            return port_list
+            ports = []
 
         if type(ports) is not list:
             ports = ports.split(",")
 
         for port in ports:
             port = int(port)
-            base = (port - 1) // 8
-
-            if base < len(port_list):
-                port_list[base] |= self.BIN_PORTS[((port - 1) % 8) + 1]
-            else:
+            if not 1 <= port <= self.total_ports:
                 raise ValueError("Port '{}' is out of range".format(port))
+            base = (port - 1) // 8
+            port_list[base] |= self.BIN_PORTS[((port - 1) % 8) + 1]
 
         # Return a packed structure here to allow compatibility with
         # Python2 that will not allow multiple tuples to be unpacked in one
@@ -760,6 +766,12 @@ class PslTypVlan802Id(PslTypVlanId):
         return rtn
 
     def pack_py(self, value):
+        def port_set(ports):
+            if type(ports) is not list:
+                ports = [p for p in ports.split(",") if p != ""]
+            return set(int(p) for p in ports)
+        if not port_set(value[2]) <= port_set(value[1]):
+            raise ValueError("Tagged ports must also be member ports")
         members = self.pack_ports(value[1])
         tagged = self.pack_ports(value[2])
         rtn = struct.pack(">h%us%us" % (len(members), len(tagged)), int(value[0]), members, tagged)
@@ -1061,6 +1073,10 @@ class PslTypPortMirror(PslTyp):
                  7: 0x02,
                  8: 0x01
                  }
+
+    # 8-port default until set_total_ports() is told the real count
+    total_ports = 8
+    num_port_bytes = 1
 
     def set_total_ports(self, total_ports):
         # Calculate number of bytes required to store bitmap of all ports

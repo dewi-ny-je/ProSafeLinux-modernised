@@ -13,8 +13,18 @@ echo "using $IFACE ($IP, broadcast $BCAST)"
 
 fail() { echo "FAIL: $*"; RC=1; }
 
+# expected password TLV for "secret" with the simulator's MAC and nonce
+password_tlv() {
+  case $1 in
+    -1|0) echo "000a=736563726574" ;;   # plaintext
+    1) echo "000a=3d1104003619" ;;      # XOR with NtgrSmartSwitchRock
+    8) echo "0018=8d23d8b4" ;;          # 32-bit hash
+    16) echo "001a=9d23dfa3e840acc0" ;; # 64-bit hash
+  esac
+}
+
 for MODE in unicast broadcast; do
-  for ENC in 0 1 8 16; do
+  for ENC in -1 0 1 8 16; do
     echo "--- $MODE replies, enhanced_encryption=$ENC"
     # macOS refuses sends to 255.255.255.255, so the simulator answers on
     # the subnet broadcast address (old firmware uses 255.255.255.255)
@@ -31,8 +41,14 @@ for MODE in unicast broadcast; do
     OUT=$($PY psl-cli.py --interface "$IFACE" --timeout 1 set --mac $MAC \
           --passwd secret --name smoke 2>&1)
     echo "$OUT" | grep -q -E "FAILED|Traceback" && fail "set: $OUT"
-    # name "smoke" = 736d6f6b65
-    grep -a "^0103" "$LOG" | grep -q "0003=736d6f6b65" || fail "set not received"
+    # name "smoke" = 736d6f6b65, sent after the password
+    grep -a "^0103" "$LOG" | grep -q "^0103 $(password_tlv $ENC) 0003=736d6f6b65" \
+      || fail "set not received as expected: $(grep -a '^0103' "$LOG")"
+    $PY psl-cli.py --interface "$IFACE" --timeout 1 set --mac $MAC \
+      --passwd secret --broadcast_filtering off --delete_vlan 15 >/dev/null 2>&1
+    SETLOG=$(grep -a "^0103" "$LOG" | tail -1)
+    echo "$SETLOG" | grep -q "5400=00" || fail "broadcast_filtering off: $SETLOG"
+    echo "$SETLOG" | grep -q "2c00=000f" || fail "delete_vlan 15: $SETLOG"
     kill $PID
     wait $PID 2>/dev/null
   done

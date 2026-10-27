@@ -71,8 +71,13 @@ class NetgearCMD(cmd.Cmd): # {{{
             querycmd = self.switch.get_cmd_by_name(query)
             if querycmd != None:
                 switchdata = self.switch.query(querycmd, self.selectedswitch['mac'])
-                for key in switchdata.keys():
-                    print("%s - %s" % (key.get_name(), switchdata[key]))
+                if not switchdata:
+                    print('No result received')
+                elif 'error' in switchdata:
+                    print('Switch reported an error: %s' % switchdata['error'])
+                else:
+                    for key in switchdata.keys():
+                        print("%s - %s" % (key.get_name(), switchdata[key]))
             else:
                 print('please give a valid query key')
 

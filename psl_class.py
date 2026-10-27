@@ -184,7 +184,7 @@ class ProSafeLinux:
     CMD_IP = psl_typ.PslTypIpv4(0x0006, "ip")
     CMD_NETMASK = psl_typ.PslTypIpv4(0x0007, "netmask")
     CMD_GATEWAY = psl_typ.PslTypIpv4(0x0008, "gateway")
-    CMD_NEW_PASSWORD = psl_typ.PslTypHexNoQuery(0x0009, "new_password")
+    CMD_NEW_PASSWORD = psl_typ.PslTypPassword(0x0009, "new_password", False)
     CMD_PASSWORD = psl_typ.PslTypPassword(0x000a, "password", False)
     CMD_DHCP = psl_typ.PslTypDHCP(0x000b, "dhcp")
     CMD_FIXMEC = psl_typ.PslTypHex(0x000c, "fixmeC")
@@ -194,6 +194,7 @@ class ProSafeLinux:
     CMD_REBOOT = psl_typ.PslTypAction(0x0013, "reboot")
     CMD_ENHANCEDENCRYPTION = psl_typ.PslTypHex(0x0014, "enhanced_encryption")
     CMD_PASSWORD_NONCE = psl_typ.PslTypHexNoQuery(0x0017, "password_nonce")
+    CMD_PASSWORD_HASH32 = psl_typ.PslTypHexNoQuery(0x0018, "password_hash32")
     CMD_PASSWORD_HASH = psl_typ.PslTypHexNoQuery(0x001a, "password_hash")
     CMD_FACTORY_RESET = psl_typ.PslTypAction(0x0400, "factory_reset")
     CMD_PORT_STATUS = psl_typ.PslTypPortStatus(0x0c00, "port_status")
@@ -272,6 +273,7 @@ class ProSafeLinux:
         # i still see no win in randomizing the starting sequence...
         self.seq = random.randint(100, 2000)
         self.last_seq = None
+        self.last_destmac = None
         self.debug = False
         self.mac_cache = {}
         self.cmd_by_id = {}
@@ -374,13 +376,16 @@ class ProSafeLinux:
         "set debugging"
         self.debug = True
 
-    def is_reply(self, message, seq):
-        "check that a packet answers the request sent with sequence seq"
+    def is_reply(self, message, seq, destmac=None):
+        """check that a packet answers the request sent with sequence seq
+        (and, unless it was a broadcast query, comes from switch destmac)"""
         return (len(message) >= 32 and message[24:28] == b"NSDP" and
                 message[8:14] == self.srcmac and
-                struct.unpack(">H", message[22:24])[0] == seq & 0xffff)
+                struct.unpack(">H", message[22:24])[0] == seq & 0xffff and
+                (not destmac or destmac == 6 * b"\x00" or
+                 message[14:20] == destmac))
 
-    def recv(self, maxlen=8192, sock=None, seq=None):
+    def recv(self, maxlen=8192, sock=None, seq=None, destmac=None):
         """receive a packet from the switch; with seq, skip packets which do
         not answer that request (duplicates, late replies, other hosts)"""
         socks = [sock]
@@ -410,16 +415,16 @@ class ProSafeLinux:
             if self.debug:
                 message_hex = binascii.hexlify(message).decode()
                 print("recv=" + message_hex)
-            if seq is not None and not self.is_reply(message, seq):
+            if seq is not None and not self.is_reply(message, seq, destmac):
                 if self.debug:
                     print("ignoring packet, not a reply to seq %d" % seq)
                 continue
             return (message, address)
 
-    def recv_all(self, seq=None):
+    def recv_all(self, seq=None, destmac=None):
         "receive all pending packets"
         while True:
-            (message, address) = self.recv(seq=seq)
+            (message, address) = self.recv(seq=seq, destmac=destmac)
             if message is None:
                 return
             yield (message, address)
@@ -502,6 +507,7 @@ class ProSafeLinux:
                       self.subnet_broadcast)
             self.ssocket.sendto(data, (self.subnet_broadcast, port))
         self.last_seq = self.seq
+        self.last_destmac = data[14:20]
         self.seq += 1
 
     def baseudp(self, ctype, destmac):
@@ -570,7 +576,8 @@ class ProSafeLinux:
         if not isinstance(cmd_arr, (tuple, list)):
             cmd_arr = (cmd_arr, )
         self.send_query(cmd_arr, mac, use_ip_func)
-        message, address = self.recv(seq=self.last_seq)
+        message, address = self.recv(seq=self.last_seq,
+                                     destmac=self.last_destmac)
         if with_address:
             return (self.parse_data(message), address)
         else:
@@ -582,7 +589,8 @@ class ProSafeLinux:
         if not isinstance(cmd_arr, (tuple, list)):
             cmd_arr = (cmd_arr, )
         self.send_query(cmd_arr, mac, use_ip_func)
-        for message, address in self.recv_all(seq=self.last_seq):
+        for message, address in self.recv_all(seq=self.last_seq,
+                                              destmac=self.last_destmac):
             if with_address:
                 yield (self.parse_data(message), address)
             else:
@@ -595,6 +603,10 @@ class ProSafeLinux:
         data = b''
 
         if type(cmddict).__name__ == 'dict':
+            cmddict = dict(cmddict)
+            if self.CMD_IP in cmddict or self.CMD_DHCP in cmddict:
+                # the switch is about to move, look it up again next time
+                self.mac_cache.pop(mac, None)
             if self.CMD_PASSWORD in cmddict:
                 result = self.add_password(mac, cmddict[self.CMD_PASSWORD])
 
@@ -635,28 +647,35 @@ class ProSafeLinux:
         data = header + data
 
         self.send(ipadr, self.SENDPORT, data)
-        seq = self.last_seq
-        message, address = self.recv(seq=seq)
+        seq, destmac = self.last_seq, self.last_destmac
+        message, address = self.recv(seq=seq, destmac=destmac)
         while message == None and transmit_counter < 3:
             time.sleep(1)
-            message, address = self.recv(seq=seq)
+            message, address = self.recv(seq=seq, destmac=destmac)
             transmit_counter += 1
         if message == None:
             return { 'error' : 'no result received within 3 seconds' }
         return self.parse_data(message)
+
+    def get_encryption_type(self, mac):
+        """ask the switch which password scheme it uses; an error dict if
+        it does not answer (never assume plaintext without an answer)"""
+        enc = self.query(self.CMD_ENHANCEDENCRYPTION, mac)
+        if not enc:
+            return { 'error' : 'no answer to the encryption type query' }
+        if self.CMD_ENHANCEDENCRYPTION not in enc:
+            # older firmware rejects the TLV: plaintext passwords
+            return self.ENCTYPE_NONE
+        return int(enc[self.CMD_ENHANCEDENCRYPTION], 16)
 
     def add_password(self, mac, password):
         "Add password to UDP data sent to the switch"
 
         data = None;
 
-        # Find out what the switch supports
-        enc = self.query(self.CMD_ENHANCEDENCRYPTION, mac)
-
-        if enc == False:
-            enc = self.ENCTYPE_NONE
-        else:
-            enc = int(enc[self.CMD_ENHANCEDENCRYPTION], 16)
+        enc = self.get_encryption_type(mac)
+        if type(enc).__name__ == 'dict':
+            return enc
 
         if enc == self.ENCTYPE_NONE:
             # No encryption - just plaintext
@@ -703,7 +722,7 @@ class ProSafeLinux:
                     _hashpass[idx] ^= ord(password[i])
 
                 _hashpass = struct.pack(">BBBB", *_hashpass)
-                data = self.addudp(self.CMD_PASSWORD_HASH, binascii.hexlify(_hashpass))
+                data = self.addudp(self.CMD_PASSWORD_HASH32, binascii.hexlify(_hashpass))
             else:
                 _hashpass += _hashpass;
 
@@ -724,83 +743,15 @@ class ProSafeLinux:
 
     def add_new_password(self, mac, password):
         "Add new password to UDP data sent to the switch"
-
-        data = None;
-
-        # Find out what the switch supports
-        enc = self.query(self.CMD_ENHANCEDENCRYPTION, mac)
-
-        if enc == False:
-            enc = self.ENCTYPE_NONE
-        else:
-            enc = int(enc[self.CMD_ENHANCEDENCRYPTION], 16)
-
-        if enc == self.ENCTYPE_NONE or enc == self.ENCTYPE_SIMPLE:
-            # No encryption - just plaintext
-            data = self.addudp(self.CMD_PASSWORD, password)
-        elif enc == self.ENCTYPE_SIMPLE:
-            # Simple fixed XOR
-            _hashkey = "NtgrSmartSwitchRock"
-            _hashpass = ""
-            for i in range(len(password)):
-                _hashpass += chr(ord(password[i]) ^ ord(_hashkey[i]))
-            data = self.addudp(self.CMD_PASSWORD, _hashpass)
-        elif enc == self.ENCTYPE_HASH32:
-            return { 'error' : 'Unsupported encryption type 0x%02x' % enc }
-        elif enc == self.ENCTYPE_HASH64:
-            nonce = self.query(self.CMD_PASSWORD_NONCE, mac)
-            if nonce == False:
-                return { 'error' : 'Could not get nonce from switch' }
-
-            # Jump through hoops to convert a hex string to an indexable
-            # group of bytes that works on Python2 and Python3
-            nonce = bytearray(binascii.unhexlify(nonce[self.CMD_PASSWORD_NONCE]));
-
-            _mac = mac
-            if len(_mac) > 6:
-                _mac = bytearray(pack_mac(_mac))
-
-            _hashpass = [_mac[1] ^ _mac[5],
-                         _mac[0] ^ _mac[4],
-                         _mac[2] ^ _mac[3],
-                         _mac[4] ^ _mac[5]]
-
-            _hashpass[0] ^= nonce[3] ^ nonce[2]
-            _hashpass[1] ^= nonce[3] ^ nonce[1]
-            _hashpass[2] ^= nonce[0] ^ nonce[2]
-            _hashpass[3] ^= nonce[0] ^ nonce[1]
-
-            if enc == self.ENCTYPE_HASH32:
-                for i in range(min(len(password),16)):
-                    if (i < 4) or (i > 7):
-                        idx = ((i + 3) % 4)
-                        idx = ((i + 3) % 4)
-                        idx ^= (idx // 2)
-                    else:
-                        idx = 3 - (i % 4)
-
-                    _hashpass[idx] ^= ord(password[i])
-
-                _hashpass = struct.pack(">BBBB", *_hashpass)
-                data = self.addudp(self.CMD_PASSWORD_HASH, binascii.hexlify(_hashpass))
-            else:
-
-                _hashpass += _hashpass;
-
-                _hashpass[6] ^= ord(password[0])
-
-                for i in range(len(password)):
-                    _hashpass[i // 3] ^= ord(password[i])
-
-                    if (i < 6) and (i % 2):
-                        _hashpass[7] ^= ord(password[i])
-
-                _hashpass = struct.pack(">BBBBBBBB", *_hashpass)
-                data = self.addudp(self.CMD_PASSWORD_HASH, binascii.hexlify(_hashpass))
-        else:
-            return { 'error' : 'Unknown encryption type 0x%02x' % enc }
-
-        return data
+        enc = self.get_encryption_type(mac)
+        if type(enc).__name__ == 'dict':
+            return enc
+        if enc == self.ENCTYPE_NONE:
+            return self.addudp(self.CMD_NEW_PASSWORD, password)
+        # how firmware with password encryption expects the new password
+        # to be encoded is not known yet
+        return { 'error' : 'Changing the password is not supported for '
+                           'encryption type 0x%02x' % enc }
 
     def passwd_exploit(self, mac, new):
         "exploit in current (2012) firmware version, set a new password"
@@ -818,16 +769,16 @@ class ProSafeLinux:
                    self.CMD_IP]
         seen = set()
         for message in self.queryall(query_arr, None):
-            if not message or "error" in message:
+            if (not message or "error" in message or
+                    self.CMD_MAC not in message or self.CMD_IP not in message):
                 continue
-            mac = message.get(self.CMD_MAC)
+            mac = message[self.CMD_MAC]
             # the same reply can arrive more than once (several sockets
             # or interfaces), only report each switch once
             if mac in seen:
                 continue
             seen.add(mac)
-            if mac is not None and self.CMD_IP in message:
-                self.mac_cache[mac] = message[self.CMD_IP]
+            self.mac_cache[mac] = message[self.CMD_IP]
             yield message
 
     def verify_data(self, datadict):

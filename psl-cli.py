@@ -34,7 +34,7 @@ def exploit(args, switch):
 def set_switch(args, switch):
     "Set values on switch"
     results = switch.query(switch.CMD_NUMBER_OF_PORTS, args.mac[0])
-    if switch.CMD_NUMBER_OF_PORTS in results:
+    if results and switch.CMD_NUMBER_OF_PORTS in results:
         switch.CMD_PORT_MIRROR.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
         switch.CMD_VLAN_ID.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
         switch.CMD_VLAN802_ID.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
@@ -49,7 +49,10 @@ def set_switch(args, switch):
                 if isinstance(scmd, psl_typ.PslTypBoolean):
                     cmds[scmd] = (vars(args)[scmd.get_name()][0] == "on")
                 else:
-                    if len(vars(args)[scmd.get_name()])==1 and scmd.get_num_args()==1:
+                    # options that may be given several times stay lists
+                    if (len(vars(args)[scmd.get_name()])==1 and
+                            scmd.get_num_args()==1 and
+                            not scmd.allow_multiple()):
                         cmds[scmd] = vars(args)[scmd.get_name()][0]
                     else:
                         cmds[scmd] = vars(args)[scmd.get_name()]
@@ -89,6 +92,9 @@ def query(args, switch, querycommand = None):
     if switchdata != False:
         if switchdata == {}:
             print("%-29s empty data received" % (query_cmd[0].get_name()))
+        elif "error" in switchdata:
+            print("%-29s switch reported an error: %s" %
+                  (query_cmd[0].get_name(), switchdata["error"]))
         else:
             for key in list(switchdata.keys()):
                 if isinstance(key, psl_typ.PslTyp):
