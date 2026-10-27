@@ -258,6 +258,9 @@ class ProSafeLinux:
     ENCTYPE_HASH32 = 0x08
     ENCTYPE_HASH64 = 0x10
 
+    PLAINTEXT_REFUSED = ("the switch asks for the password in plaintext (old "
+                         "firmware); allow it with --allow-plaintext")
+
     RECPORT = 63321
     SENDPORT = 63322
 
@@ -269,6 +272,9 @@ class ProSafeLinux:
         self.brsocket = None
         self.subnet_broadcast = None
         self.timeout=2
+        # plaintext passwords only on request: the reply asking for them
+        # is not authenticated and could be forged by someone on the LAN
+        self.allow_plaintext = False
 
         # i still see no win in randomizing the starting sequence...
         self.seq = random.randint(100, 2000)
@@ -679,6 +685,8 @@ class ProSafeLinux:
 
         if enc == self.ENCTYPE_NONE:
             # No encryption - just plaintext
+            if not self.allow_plaintext:
+                return { 'error' : self.PLAINTEXT_REFUSED }
             data = self.addudp(self.CMD_PASSWORD, password)
         elif enc == self.ENCTYPE_SIMPLE:
             # Simple fixed XOR
@@ -747,6 +755,8 @@ class ProSafeLinux:
         if type(enc).__name__ == 'dict':
             return enc
         if enc == self.ENCTYPE_NONE:
+            if not self.allow_plaintext:
+                return { 'error' : self.PLAINTEXT_REFUSED }
             return self.addudp(self.CMD_NEW_PASSWORD, password)
         # how firmware with password encryption expects the new password
         # to be encoded is not known yet

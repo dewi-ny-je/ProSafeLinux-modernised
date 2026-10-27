@@ -72,7 +72,10 @@ def query(args, switch, querycommand = None):
     "query values from the switch"
     if not(args.passwd == None):
         login = {switch.CMD_PASSWORD: args.passwd[0]}
-        switch.transmit(login, args.mac[0])
+        result = switch.transmit(login, args.mac[0])
+        if 'error' in result:
+            print("Login FAILED: " + str(result['error']))
+            return
     query_cmd = []
     if querycommand != None:
         query_cmd.append(querycommand)
@@ -114,7 +117,10 @@ def query_raw(args, switch):
     print("QUERY DEBUG RAW")
     if not(args.passwd == None):
         login = {switch.CMD_PASSWORD: args.passwd[0]}
-        switch.transmit(login, args.mac[0])
+        result = switch.transmit(login, args.mac[0])
+        if 'error' in result:
+            print("Login FAILED: " + str(result['error']))
+            return
     i = 0x0001
     while (i < ProSafeLinux.CMD_END.get_id()):
         query_cmd = []
@@ -158,6 +164,9 @@ def main():
     parser.add_argument("--interface", nargs=1,
         help="Interface (default: the one carrying the default route)")
     parser.add_argument("--debug", help="Debug output", action='store_true')
+    parser.add_argument("--allow-plaintext", action='store_true',
+        help="send the password in plaintext if the switch asks for it "
+             "(old firmware); anyone on the network can read it")
     parser.add_argument("--timeout", help="set timeout for switch commands",
                 default="0.1", type=float)
     subparsers = parser.add_subparsers(help='operation', dest="operation")
@@ -226,6 +235,7 @@ def main():
         interface = args.interface[0]
 
     switch.set_timeout(args.timeout)
+    switch.allow_plaintext = args.allow_plaintext
 
     if not switch.bind(interface):
         print("Interface %s has no IPv4 or hardware address, "

@@ -38,13 +38,22 @@ for MODE in unicast broadcast; do
           model serial_number number_of_ports)
     echo "$OUT" | grep -q "GS108Ev3" || fail "query model: $OUT"
     echo "$OUT" | grep -q "4XB12345A0001" || fail "query serial: $OUT"
-    OUT=$($PY psl-cli.py --interface "$IFACE" --timeout 1 set --mac $MAC \
+    PLAIN=""
+    if [ "$ENC" -le 0 ]; then
+      # plaintext firmware: refused unless explicitly allowed
+      OUT=$($PY psl-cli.py --interface "$IFACE" --timeout 1 set --mac $MAC \
+            --passwd secret --name smoke 2>&1)
+      echo "$OUT" | grep -q "allow-plaintext" || fail "plaintext not refused: $OUT"
+      grep -a -q "^0103" "$LOG" && fail "password sent without --allow-plaintext"
+      PLAIN=--allow-plaintext
+    fi
+    OUT=$($PY psl-cli.py --interface "$IFACE" --timeout 1 $PLAIN set --mac $MAC \
           --passwd secret --name smoke 2>&1)
     echo "$OUT" | grep -q -E "FAILED|Traceback" && fail "set: $OUT"
     # name "smoke" = 736d6f6b65, sent after the password
     grep -a "^0103" "$LOG" | grep -q "^0103 $(password_tlv $ENC) 0003=736d6f6b65" \
       || fail "set not received as expected: $(grep -a '^0103' "$LOG")"
-    $PY psl-cli.py --interface "$IFACE" --timeout 1 set --mac $MAC \
+    $PY psl-cli.py --interface "$IFACE" --timeout 1 $PLAIN set --mac $MAC \
       --passwd secret --broadcast_filtering off --delete_vlan 15 >/dev/null 2>&1
     SETLOG=$(grep -a "^0103" "$LOG" | tail -1)
     echo "$SETLOG" | grep -q "5400=00" || fail "broadcast_filtering off: $SETLOG"

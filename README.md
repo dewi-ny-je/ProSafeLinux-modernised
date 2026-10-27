@@ -34,8 +34,10 @@ Apple's command line tools.
  * The default timeout is 0.1 seconds; if a switch does not answer, try
    `--timeout 1`.
  * Password hashing is picked automatically from what the switch reports:
-   plain text, a fixed XOR, or the nonce based 32/64 bit hashes of
-   recent firmware.
+   a fixed XOR or the nonce based 32/64 bit hashes of recent firmware. Old
+   firmware only accepts plain text passwords; because that reply could be
+   forged by anyone on the network, plain text is only sent when you add
+   `--allow-plaintext`.
 
 ## Examples
 
