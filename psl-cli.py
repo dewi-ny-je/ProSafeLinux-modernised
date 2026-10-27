@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 "Main Program executed by the user"
 
@@ -13,6 +13,8 @@ import psl_typ
 def discover(args, switch):
     "Search for Switches"
     print("Searching for ProSafe Plus Switches ...\n")
+    found = False
+
     for data in switch.discover():
         found = True
         for entry in data.keys():
@@ -28,9 +30,15 @@ def discover(args, switch):
 def exploit(args, switch):
     "exploit in current (2012) fw, can set a new password"
     switch.passwd_exploit(args.mac[0], args.new_password[0])
-    
+
 def set_switch(args, switch):
     "Set values on switch"
+    results = switch.query(switch.CMD_NUMBER_OF_PORTS, args.mac[0])
+    if switch.CMD_NUMBER_OF_PORTS in results:
+        switch.CMD_PORT_MIRROR.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
+        switch.CMD_VLAN_ID.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
+        switch.CMD_VLAN802_ID.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
+
     cmds = {ProSafeLinux.CMD_PASSWORD: args.passwd[0]}
     for scmd in switch.get_setable_cmds():
         if vars(args)[scmd.get_name()] is not None:
@@ -41,7 +49,7 @@ def set_switch(args, switch):
                 if isinstance(scmd, psl_typ.PslTypBoolean):
                     cmds[scmd] = (vars(args)[scmd.get_name()][0] == "on")
                 else:
-                    if len(vars(args)[scmd.get_name()])==1:
+                    if len(vars(args)[scmd.get_name()])==1 and scmd.get_num_args()==1:
                         cmds[scmd] = vars(args)[scmd.get_name()][0]
                     else:
                         cmds[scmd] = vars(args)[scmd.get_name()]
@@ -149,7 +157,7 @@ def main():
     subparsers = parser.add_subparsers(help='operation', dest="operation")
 
     subparsers.add_parser('discover', help='Find all switches in all subnets')
-    
+
     exploit_parser = subparsers.add_parser("exploit",
        help="set a password without knowing the old one")
     exploit_parser.add_argument("--mac", nargs=1,
@@ -166,7 +174,7 @@ def main():
     for cmd in switch.get_query_cmds():
         choices.append(cmd.get_name())
     choices.append("all")
-    
+
     query_parser.add_argument("query", nargs="+", help="What to query for",
         choices=choices)
 
@@ -188,12 +196,16 @@ def main():
                 dest=cmd.get_name(), action='store_true')
 
         else:
-            set_parser.add_argument("--" + cmd.get_name(), 
+            action = 'store'
+            if cmd.allow_multiple():
+                action = 'append'
+            set_parser.add_argument("--" + cmd.get_name(),
                 nargs=cmd.get_num_args(),
                 type=cmd.get_set_type(),
                 help=cmd.get_set_help(),
                 metavar=cmd.get_metavar(),
-                choices=cmd.get_choices())
+                choices=cmd.get_choices(),
+                action=action)
 
     args = parser.parse_args()
     interface = args.interface[0]
