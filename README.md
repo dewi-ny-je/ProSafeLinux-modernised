@@ -1,15 +1,46 @@
+# ProSafeLinux (psl-cli.py)
 
-If your interface is **not** eth0 please specify it, when you call *psl.py*.
+Query and set data on Netgear ProSafe Plus switches (GS105E, GS108E, GS116E
+and friends) from Linux or macOS, using the NSDP protocol that Netgear's
+"ProSafe Plus Utility" speaks.
 
-# Examples
+These are known to work:
+ * GS105E 1.02.04
+ * GS108Ev2 1.00.12
+ * GS108Ev3 2.06.08EN (replies come via unicast)
+
+## Requirements
+
+Python 3.9 or newer and nothing else: no third-party packages are needed.
+Tested on Linux (Ubuntu) and macOS, including the Python 3.9 that ships with
+Apple's command line tools.
+
+## Using psl-cli.py
+
+    usage: psl-cli.py [-h] [--interface INTERFACE] [--debug]
+                      [--timeout TIMEOUT]
+                      {discover,exploit,query,query_raw,set} ...
+
+ * By default the interface carrying the default route is used (for example
+   `enp3s0` on Ubuntu or `en0` on macOS). Pass `--interface` to choose another
+   one, e.g. a USB Ethernet adapter on a Mac.
+ * Older switch firmware (before 2018?) returns responses to the broadcast
+   address, newer firmware returns them to the sender. Both are handled.
+ * The default timeout is 0.1 seconds; if a switch does not answer, try
+   `--timeout 1`.
+ * Password hashing is picked automatically from what the switch reports:
+   plain text, a fixed XOR, or the nonce based 32/64 bit hashes of
+   recent firmware.
+
+## Examples
 
 Gives an overview of all available options
 
-    ./psl.py --help
+    ./psl-cli.py --help
 
 Discover all ProSafe switches on the local network
 
-    ./psl.py --interface eth1 discover
+    ./psl-cli.py --interface eth1 discover
 
 Set 802.1Q VLAN VID for port 4 to 1
 
@@ -19,35 +50,55 @@ Query all ports for their 802.1Q VLAN port VID
 
     ./psl-cli.py query --mac B0:B9:8A:57:F6:56 vlan_pvid
 
+## Testing
 
-# Help wanted
+`tests/smoke_test.sh` runs the command line tool against a small simulated
+switch on the local machine (unicast and broadcast replies, every password
+scheme). `tests/check_interfaces.py` checks that the interface detection agrees
+with `ip`/`ifconfig`. Both run in CI on Ubuntu and macOS.
 
-Im sorry I am not active at this project anymore. It is open-source so perhabs you could find soneone who can help you.
- 
-I have found a security problem with this switch and was very disapointed in the answer from netgear. They need more than 6 Month to fix it and want the ethernet adress of it 
- 
-Because of this, I do not use this switch anymore.
- 
-If you can read german, please read this two articles:
- 
+## Known issues
+
+Newer switches that have web servers may have "Switch Management Mode" set to
+"Web browser only", which will result in the switch only responding to
+discovery requests. To use this software, log in to the web UI and set "Switch
+Management Mode" to "Web browser and Plus Utility".
+
+## Wireshark
+
+`wireshark/nsdp.lua` is a dissector for the protocol.
+
+## Help wanted
+
+Feel free to fork the code and send pull requests.
+
+The original author found a security problem with these switches, described
+(in German) here:
+
 http://www.linux-magazin.de/Blogs/Insecurity-Bulletin/Gastbeitrag-Security-by-Obscurity-bei-Netgear-Switches
 http://www.linux-magazin.de/Ausgaben/2012/10/Switch
- 
-Please feel free to fork the code and do any push request.
 
-Please contact me if you like to do the new maintainer of the projekt Sven Anders &lt;psl-github2013@sven.anders.im&gt;
+## Forks merged into this one
 
-# Other similar projects
+ * https://github.com/rhulme/ProSafeLinux (Richard Hulme)
+ * https://github.com/Z3po/ProSafeLinux (Sebastian Cabrera, Steven Bytnar)
+ * https://github.com/flucas1/ProSafeLinux (Fernando Lucas)
+
+## Other similar projects
 
 https://github.com/Z3po/Netgearizer (We are merging code together.)
 
-# Authors
+## Authors
 
 * Asbjørn Sloth Tønnesen 
 * Lars Dennis Renneberg Andersen
 * Svenne Krap
 * Shane Kerr
 * Sven Anders
+* Steven Bytnar
+* Richard Hulme
+* Mario Haustein
+* Fernando Lucas
 
 See also: http://git.asbjorn.biz/?p=gs105e.git;a=summary
 
