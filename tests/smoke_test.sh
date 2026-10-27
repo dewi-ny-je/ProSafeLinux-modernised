@@ -5,17 +5,20 @@ PY=${1:-python3}
 cd "$(dirname "$0")/.." || exit 1
 IFACE=$($PY -c 'import psl_class; print(psl_class.default_interface())')
 IP=$($PY -c "import psl_class; print(psl_class.get_ip_address('$IFACE'))")
+BCAST=$($PY -c "import psl_class; print(psl_class.get_broadcast_address('$IFACE'))")
 MAC=b0:b9:8a:57:f6:56
 LOG=$(mktemp)
 RC=0
-echo "using $IFACE ($IP)"
+echo "using $IFACE ($IP, broadcast $BCAST)"
 
 fail() { echo "FAIL: $*"; RC=1; }
 
 for MODE in unicast broadcast; do
   for ENC in 0 1 8 16; do
     echo "--- $MODE replies, enhanced_encryption=$ENC"
-    $PY tests/fake_switch.py "$IP" $MODE $ENC >"$LOG" 2>&1 &
+    # macOS refuses sends to 255.255.255.255, so the simulator answers on
+    # the subnet broadcast address (old firmware uses 255.255.255.255)
+    $PY tests/fake_switch.py "$IP" $MODE $ENC "$BCAST" >"$LOG" 2>&1 &
     PID=$!
     sleep 1
     OUT=$($PY psl-cli.py --interface "$IFACE" --timeout 1 discover)

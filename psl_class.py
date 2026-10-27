@@ -44,11 +44,13 @@ _Ifaddrs._fields_ = [("ifa_next", ctypes.POINTER(_Ifaddrs)),
 _AF_PACKET = getattr(socket, "AF_PACKET", 17)
 _AF_LINK = getattr(socket, "AF_LINK", 18)
 _IFF_UP = 0x1
+_IFF_BROADCAST = 0x2
 _IFF_LOOPBACK = 0x8
 
 
 def get_interfaces():
-    """returns {ifname: {"mac": str or None, "ipv4": [str], "flags": int}}
+    """returns {ifname: {"mac": str or None, "ipv4": [str],
+                         "broadcast": [str], "flags": int}}
     using getifaddrs(3), which works on Linux and macOS alike"""
     # dlopen(NULL): libc symbols are already loaded into the process
     libc = ctypes.CDLL(None, use_errno=True)
@@ -63,6 +65,7 @@ def get_interfaces():
             entry = ifa.contents
             name = entry.ifa_name.decode()
             info = result.setdefault(name, {"mac": None, "ipv4": [],
+                                            "broadcast": [],
                                             "flags": entry.ifa_flags})
             if entry.ifa_addr:
                 addr = entry.ifa_addr.contents
@@ -76,6 +79,11 @@ def get_interfaces():
                 if addr.sa_family == socket.AF_INET:
                     # sockaddr_in: the address is at offset 4 on both
                     info["ipv4"].append(socket.inet_ntoa(raw[4:8]))
+                    # ifa_dstaddr holds the broadcast address on
+                    # broadcast-capable interfaces
+                    if entry.ifa_flags & _IFF_BROADCAST and entry.ifa_dstaddr:
+                        braw = ctypes.string_at(entry.ifa_dstaddr, 8)
+                        info["broadcast"].append(socket.inet_ntoa(braw[4:8]))
                 elif addr.sa_family == _AF_PACKET and \
                         sys.platform.startswith("linux"):
                     # sockaddr_ll: halen at 11, addr at 12
@@ -111,6 +119,14 @@ def get_ip_address(ifname):
     if info is None or not info["ipv4"]:
         return None
     return info["ipv4"][0]
+
+
+def get_broadcast_address(ifname):
+    "returns the IPv4 broadcast address of an interface's first subnet"
+    info = get_interfaces().get(ifname)
+    if info is None or not info["broadcast"]:
+        return None
+    return info["broadcast"][0]
 
 
 def default_interface():
@@ -250,6 +266,7 @@ class ProSafeLinux:
         self.srcmac = None
         self.ssocket = None
         self.brsocket = None
+        self.subnet_broadcast = None
         self.timeout=2
 
         # i still see no win in randomizing the starting sequence...
@@ -280,6 +297,7 @@ class ProSafeLinux:
         if not hwaddr:
             return False
         self.srcmac = pack_mac(hwaddr)
+        self.subnet_broadcast = get_broadcast_address(interface)
 
         # send socket, also receives replies sent by unicast (newer firmware)
         self.ssocket = self._udp_socket()
@@ -470,7 +488,19 @@ class ProSafeLinux:
             # binascii.unhexlify() requires bytes in Python 3
             data_hex = binascii.hexlify(data).decode()
             print("send to ip " + host + " data = " + data_hex)
-        self.ssocket.sendto(data, (host, port))
+        try:
+            self.ssocket.sendto(data, (host, port))
+        except OSError as error:
+            # macOS refuses the limited broadcast address (EHOSTUNREACH);
+            # the subnet broadcast reaches the same Ethernet broadcast MAC
+            if (host != "255.255.255.255" or not self.subnet_broadcast or
+                    error.errno not in (errno.EHOSTUNREACH, errno.ENETUNREACH,
+                                        errno.EADDRNOTAVAIL)):
+                raise
+            if self.debug:
+                print("limited broadcast refused, using " +
+                      self.subnet_broadcast)
+            self.ssocket.sendto(data, (self.subnet_broadcast, port))
         self.last_seq = self.seq
         self.seq += 1
 

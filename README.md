@@ -26,6 +26,11 @@ Apple's command line tools.
    one, e.g. a USB Ethernet adapter on a Mac.
  * Older switch firmware (before 2018?) returns responses to the broadcast
    address, newer firmware returns them to the sender. Both are handled.
+ * macOS does not allow sending to 255.255.255.255, so there discovery falls
+   back to the subnet broadcast address of the interface (e.g.
+   192.168.1.255). On macOS 15 and later, allow "Local Network" access for
+   your terminal app in System Settings > Privacy & Security if nothing is
+   found.
  * The default timeout is 0.1 seconds; if a switch does not answer, try
    `--timeout 1`.
  * Password hashing is picked automatically from what the switch reports:

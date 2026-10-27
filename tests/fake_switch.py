@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal NSDP switch simulator for smoke tests.
 
-usage: fake_switch.py IP [unicast|broadcast] [ENCTYPE]
+usage: fake_switch.py IP [unicast|broadcast] [ENCTYPE] [BROADCAST_ADDR]
 
 Answers queries for a few fields and acknowledges every set request,
 printing what it received on stdout.  IP is the address it reports
@@ -14,6 +14,7 @@ import sys
 IP = sys.argv[1]
 MODE = sys.argv[2] if len(sys.argv) > 2 else "unicast"
 ENC = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0
+BROADCAST = sys.argv[4] if len(sys.argv) > 4 else "255.255.255.255"
 MAC = bytes.fromhex("b0b98a57f656")
 VALUES = {
     0x0001: b"GS108Ev3",
@@ -52,5 +53,5 @@ while True:
     if MODE == "unicast":
         target = (addr[0], 63321)
     else:
-        target = ("255.255.255.255", 63321)
+        target = (BROADCAST, 63321)
     sock.sendto(header + tlvs + b"\xff\xff\x00\x00", target)

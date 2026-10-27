@@ -13,7 +13,8 @@ print("default interface:", iface)
 assert iface, "no default interface found"
 mac = psl_class.get_hw_addr(iface)
 ip = psl_class.get_ip_address(iface)
-print("mac:", mac, "ip:", ip)
+bcast = psl_class.get_broadcast_address(iface)
+print("mac:", mac, "ip:", ip, "broadcast:", bcast)
 
 if sys.platform.startswith("linux"):
     with open("/sys/class/net/%s/address" % iface) as f:
@@ -24,8 +25,10 @@ else:
     out = subprocess.run(["ifconfig", iface],
                          capture_output=True, text=True).stdout
     expected_mac = re.search(r"ether ([0-9a-f:]+)", out).group(1)
+expected_bcast = re.findall(r"(?:broadcast|brd) (\d+\.\d+\.\d+\.\d+)", out)
 expected_ips = re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out)
 print("expected mac:", expected_mac, "ips:", expected_ips)
 assert mac == expected_mac, "mac mismatch"
 assert ip in expected_ips, "ip mismatch"
+assert bcast in expected_bcast, "broadcast mismatch: %s" % expected_bcast
 print("OK")

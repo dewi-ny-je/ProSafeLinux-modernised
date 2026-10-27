@@ -23,8 +23,5 @@ jobs:
         run: python psl-cli.py --help
       - name: Interface detection matches the OS
         run: python tests/check_interfaces.py
-      - name: Network diagnostics (temporary)
-        if: runner.os == 'macOS'
-        run: python tests/diag_net.py
       - name: Talk to a simulated switch
         run: tests/smoke_test.sh python
