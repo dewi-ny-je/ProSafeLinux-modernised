@@ -1,0 +1,27 @@
+name: smoke tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.x"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Byte-compile
+        run: python -W error -m py_compile psl_class.py psl_typ.py psl-cli.py psl-cmd.py
+      - name: CLI help
+        run: python psl-cli.py --help
+      - name: Interface detection matches the OS
+        run: python tests/check_interfaces.py
+      - name: Talk to a simulated switch
+        run: tests/smoke_test.sh python

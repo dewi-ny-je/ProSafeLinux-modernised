@@ -4,6 +4,22 @@
 import binascii
 import struct
 
+class PslError:
+    "Error class to map error codes to descriptions"
+    def __init__(self, code, desc):
+        "constructor"
+        self.code = code
+        self.desc = desc
+
+    def get_code(self):
+        "error code"
+        return self.code
+
+    def get_desc(self):
+        "human-readable error description"
+        return self.desc
+
+
 class PslTyp:
     "Base type every other type is inherited by this"
     def __init__(self, cmd_id, name):
@@ -58,14 +74,18 @@ class PslTyp:
     def get_metavar(self):
         "argparse metavar to set"
         return None
-    
+
     def get_set_type(self):
         "argparse type to set"
         return None
-    
+
     def get_set_help(self):
         "argparse help argument for set operation"
         return None
+
+    def allow_multiple(self):
+        "can this command be set multiple times in one transaction"
+        return self.get_num_args() > 1
 
 ###############################################################################
 
@@ -130,7 +150,7 @@ class PslTypBoolean(PslTyp):
         return (numval == 0x01)
 
     def pack_cmd(self, value):
-        return self.pack_py(value.lowercase == "on")
+        return self.pack_py(value.lower() == "on")
 
     def unpack_cmd(self, value):
         if (self.unpack_py(value)):
@@ -148,6 +168,38 @@ class PslTypBoolean(PslTyp):
 ###############################################################################
 
 
+class PslTypFiltering(PslTyp):
+    " Broadcast filtering, like a boolean but 0x00 and 0x03"
+    def pack_py(self, value):
+        if isinstance(value, str):
+            # the command line passes "on"/"off"
+            value = (value.lower() == "on")
+        if (value):
+            return struct.pack(">b", 0x03)
+        else:
+            return struct.pack(">b", 0x00)
+
+    def unpack_py(self, value):
+        numval = struct.unpack(">b", value)[0]
+        return (numval == 0x03)
+
+    def pack_cmd(self, value):
+        return self.pack_py(value.lower() == "on")
+
+    def unpack_cmd(self, value):
+        if (self.unpack_py(value)):
+            return "on"
+        else:
+            return "off"
+
+    def is_setable(self):
+        return True
+
+    def get_choices(self):
+        return ["on", "off"]
+
+
+###############################################################################
 class PslTypDHCP(PslTypBoolean):
     "DHCP"
 # we already have that in base PslTypBoolean class, haven't we ?
@@ -183,7 +235,7 @@ class PslTypMac(PslTyp):
                                       val[9:11] + val[12:14] + val[15:17])
         if (len(val) == 12):
             return binascii.unhexlify(val)
-        raise "unkown mac format=" + val
+        raise ValueError("unknown mac format=" + val)
 
     def unpack_py(self, value):
         mac = binascii.hexlify(value)
@@ -250,6 +302,24 @@ class PslTypHex(PslTyp):
 
 ################################################################################
 
+class PslTypDec(PslTyp):
+    "just decode to decimal"
+    def pack_py(self, value):
+        return binascii.unhexlify(value)
+
+    def unpack_py(self, value):
+        # Convert bytes to a hex string then to a decimal integer
+        # This allows us to convert a big-endian value of unknown length
+        return int(binascii.hexlify(value).decode(), 16)
+
+    def pack_cmd(self, value):
+        return self.pack_py(value)
+
+    def unpack_cmd(self, value):
+        return self.unpack_py(value)
+
+################################################################################
+
 class PslTypUnknown(PslTypHex):
     "Unknown Data"
     def unpack_cmd(self, value):
@@ -281,14 +351,23 @@ class PslTypEnd(PslTypHex):
 ################################################################################
 
 
-class PslTypSpeedStat(PslTyp):
-    "Speed statistic 10/100/1000 per port"
+class PslTypPortStatus(PslTyp):
+    "Speed/flow control status per port"
     SPEED_NONE = 0x00
     SPEED_10MH = 0x01
-    SPEED_10ML = 0x02
+    SPEED_10MF = 0x02
     SPEED_100MH = 0x03
-    SPEED_100ML = 0x04
+    SPEED_100MF = 0x04
     SPEED_1G = 0x05
+
+    speed_to_string = {
+        SPEED_NONE: "Not conn.",
+        SPEED_10MH: "10Mbit/s half",
+        SPEED_10MF: "10Mbit/s",
+        SPEED_100MH: "100Mbit/s half",
+        SPEED_100MF: "100Mbit/s",
+        SPEED_1G: "1Gbit/s"
+        }
 
     def unpack_py(self, value):
         # Python 3 uses an array of bytes, Python 2 uses a string
@@ -296,13 +375,13 @@ class PslTypSpeedStat(PslTyp):
             rtn = {
                 "port": struct.unpack(">b", value[0])[0],
                 "speed": struct.unpack(">b", value[1])[0],
-                "rest": binascii.hexlify(value[2:]),
+                "flow": struct.unpack(">b", value[2])[0]
             }
         else:
             rtn = {
                 "port": value[0],
                 "speed": value[1],
-                "rest": binascii.hexlify(value[2:]).decode(),
+                "flow": value[2]
             }
         return rtn
 
@@ -310,26 +389,115 @@ class PslTypSpeedStat(PslTyp):
         return False
 
     def print_result(self, value):
-        print("%-30s%4s%15s%10s" % ("Speed Statistic:", "Port",
-                                    "Speed", "FIXME"))
+        print("%-30s%4s%20s%15s" % ("Status:", "Port",
+                                    "Speed", "Flow control"))
+
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
         for row in value:
-            speed = row["speed"]
-            if speed == PslTypSpeedStat.SPEED_NONE:
-                speed = "Not conn."
-            if speed == PslTypSpeedStat.SPEED_10MH:
-                speed = "10 Mbit/s H"
-            if speed == PslTypSpeedStat.SPEED_10ML:
-                speed = "10 Mbit/s L"
-            if speed == PslTypSpeedStat.SPEED_100MH:
-                speed = "100 Mbit/s H"
-            if speed == PslTypSpeedStat.SPEED_100ML:
-                speed = "100 Mbit/s L"
-            if speed == PslTypSpeedStat.SPEED_1G:
-                speed = "1 Gbit/s"
-            print("%-30s%4d%15s%10s" % ("", row["port"], speed, row["rest"]))
+            speed = self.speed_to_string[row["speed"]]
+
+            flow = "Enabled"
+            if row["flow"] == 0:
+                flow = "Disabled"
+
+            print("%-30s%4d%20s%15s" % ("", row["port"], speed, flow))
 
     def unpack_cmd(self, value):
         return self.unpack_py(value)
+
+
+################################################################################
+
+
+class PslTypAdminPortStatus(PslTyp):
+    "Max speed/flow control per port"
+    SPEED_DISABLE = 0x00
+    SPEED_AUTO = 0x01
+    SPEED_10MH = 0x02
+    SPEED_10MF = 0x03
+    SPEED_100MH = 0x04
+    SPEED_100MF = 0x05
+
+    speed_to_string = {
+        SPEED_DISABLE: "Disable",
+        SPEED_AUTO: "Auto",
+        SPEED_10MH: "10M half",
+        SPEED_10MF: "10M",
+        SPEED_100MH: "100M half",
+        SPEED_100MF: "100M",
+        }
+
+    string_to_speed = {
+        "DISABLE":SPEED_DISABLE,
+        "NONE":SPEED_DISABLE,
+        "AUTO":SPEED_AUTO,
+        "10MH":SPEED_10MH,
+        "10M":SPEED_10MF,
+        "100MH":SPEED_100MH,
+        "100M":SPEED_100MF,
+    }
+
+    def unpack_py(self, value):
+        # Python 3 uses an array of bytes, Python 2 uses a string
+        if type(value) is str:
+            rtn = {
+                "port": struct.unpack(">b", value[0])[0],
+                "speed": struct.unpack(">b", value[1])[0],
+                "flow": struct.unpack(">b", value[2])[0]
+            }
+        else:
+            rtn = {
+                "port": value[0],
+                "speed": value[1],
+                "flow": value[2]
+            }
+
+        return rtn
+
+    def pack_py(self, value):
+        port = int(value[0])
+        speed = self.string_to_speed[value[1].upper()]
+        flow = (value[2].lower() == "on")
+        rtn = struct.pack(">bbb", port, speed, flow)
+        return rtn
+
+    def unpack_cmd(self, value):
+        return self.unpack_py(value)
+
+    def print_result(self, value):
+        print("%-30s%4s%20s%15s" % ("Status:", "Port",
+                                    "Speed", "Flow control"))
+
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
+        for row in value:
+            speed = self.speed_to_string[row["speed"]]
+            flow = "On"
+            if row["flow"] == 0:
+                flow = "Off"
+
+            print("%-30s%4d%20s%15s" % ("", row["port"], speed, flow))
+
+    def is_queryable(self):
+        return True
+
+    def is_setable(self):
+        return True
+
+    def get_num_args(self):
+        return 3
+
+    def get_metavar(self):
+        return ("PORT", "SPEED", "FLOW")
+
+    def get_set_help(self):
+        out = "SPEED can be: NONE,AUTO,10MH,10M,100MH,100M, FLOW can be: ON, OFF"
+        return out
 
 
 ################################################################################
@@ -363,6 +531,11 @@ class PslTypPortStat(PslTyp):
                                       "Rec.", "Send", "Packets",
                                       "Broadcast pkt", "Multicast pkt",
                                       "CRC errors"))
+
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
         for row in value:
             print("%-30s%4d%15d%15d%15d%15d%15d%15d" % ("",
                                       row["port"], row["rec"],
@@ -438,10 +611,15 @@ class PslTypBandwidth(PslTyp):
         limit = self.string_to_speed[value[1]]
         rtn = struct.pack(">bbbh", int(value[0]), 0, 0, limit)
         return rtn
-        
+
     def print_result(self, value):
         print("%-30s%4s%15s %s" % (self.get_name().capitalize(), "Port",
                                       "Limit", "FIXME"))
+
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
         for row in value:
             print("%-30s%4d%15s %s " % ("",
                                         row["port"],
@@ -479,35 +657,73 @@ class PslTypVlanId(PslTyp):
                  8: 0x01
                  }
 
+    # 8-port default until set_total_ports() is told the real count
+    total_ports = 8
+    num_port_bytes = 1
+
+    def set_total_ports(self, total_ports):
+        # Calculate number of bytes required to store bitmap of all ports
+        self.total_ports = total_ports
+        self.num_port_bytes = (total_ports + 7) // 8
+
+    def unpack_ports(self, port_bitmap, start = 0, length = 0):
+        if length == 0:
+            length = len(port_bitmap) - start
+
+        port_bitmap = port_bitmap[start:start + length]
+        port_list = []
+        base = 0
+
+        # Bytes are a bitmap of the ports from left-to-right
+        # (so most-significant bit in the first byte is port 1)
+        for ports in struct.unpack("%uB" % len(port_bitmap), port_bitmap):
+            for port in list(self.BIN_PORTS.keys()):
+                if (ports & self.BIN_PORTS[port] > 0):
+                    port_list.append(port + base)
+            base += 8
+
+        return port_list
+
+    def pack_ports(self, ports):
+        "helper method to pack ports to binary"
+        port_list = [0] * self.num_port_bytes
+
+        if ports == "":
+            ports = []
+
+        if type(ports) is not list:
+            ports = ports.split(",")
+
+        for port in ports:
+            port = int(port)
+            if not 1 <= port <= self.total_ports:
+                raise ValueError("Port '{}' is out of range".format(port))
+            base = (port - 1) // 8
+            port_list[base] |= self.BIN_PORTS[((port - 1) % 8) + 1]
+
+        # Return a packed structure here to allow compatibility with
+        # Python2 that will not allow multiple tuples to be unpacked in one
+        # line so the results from multple calls to 'pack_ports' cannot be
+        # passed to struct.pack unless we return a single value here (and not
+        # a tuple)
+        return struct.pack("%uB" % len(port_list), *port_list)
+
     def unpack_py(self, value):
-        ports = struct.unpack(">B", value[2:])[0]
-        out_ports = []
-        for port in list(self.BIN_PORTS.keys()):
-            if (ports & self.BIN_PORTS[port] > 0):
-                out_ports.append(port)
+        out_ports = self.unpack_ports(value, 2)
+
         rtn = {
             "vlan_id": struct.unpack(">h", value[0:2])[0],
             "ports": out_ports
         }
         return rtn
-        
-    def pack_port(self, ports):
-        "helper method to pack ports to binary"
-        rtn = 0
-        if ports == "":
-            return rtn
-        for port in ports.split(","):
-            rtn = rtn + self.BIN_PORTS[int(port)]
-        return rtn
 
     def pack_py(self, value):
-        ports = self.pack_port(value[1])
-        rtn = struct.pack(">hB", int(value[0]), ports)
-        return rtn
+        ports = self.pack_ports(value[1])
+        return struct.pack(">h%us" % len(ports), int(value[0]), ports)
 
     def unpack_cmd(self, value):
         return self.unpack_py(value)
-        
+
     def is_setable(self):
         return True
 
@@ -520,11 +736,15 @@ class PslTypVlanId(PslTyp):
     def print_result(self, value):
         print("%-30s%7s %s" % (self.get_name().capitalize(), "VLAN_ID",
                                       "Ports"))
+
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
         for row in value:
             print("%-30s%7d %s" % ("",
                                    int(row["vlan_id"]),
                                    ",".join([str(x) for x in row["ports"]])))
-
 
 ################################################################################
 
@@ -533,32 +753,28 @@ class PslTypVlan802Id(PslTypVlanId):
     "802Vlan is binary coded"
 
     def unpack_py(self, value):
-        # Python 3 uses an array of bytes, Python 2 uses a string
-        if type(value) is str:
-            tagged_ports = struct.unpack(">B", value[2])[0]
-            untagged_ports = struct.unpack(">B", value[3])[0]
-        else:
-            tagged_ports = value[2]
-            untagged_ports = value[3]
-        out_tagged_ports = []
-        out_untagged_ports = []
-        for port in list(self.BIN_PORTS.keys()):
-            if (tagged_ports & self.BIN_PORTS[port] > 0):
-                out_tagged_ports.append(port)
-            if (untagged_ports & self.BIN_PORTS[port] > 0):
-                out_untagged_ports.append(port)
+        port_len = (len(value) - 1) // 2
+
+        out_member_ports = self.unpack_ports(value, 2, port_len)
+        out_tagged_ports = self.unpack_ports(value, 2 + port_len, port_len)
+
         rtn = {
             "vlan_id": struct.unpack(">h", value[0:2])[0],
-            "tagged_ports": out_tagged_ports,
-            "untagged_ports": out_untagged_ports
+            "member_ports":out_member_ports,
+            "tagged_ports": out_tagged_ports
         }
         return rtn
-        
 
     def pack_py(self, value):
-        tagged = self.pack_port(value[1])
-        untagged = self.pack_port(value[2])
-        rtn = struct.pack(">hBB", int(value[0]), tagged, untagged)
+        def port_set(ports):
+            if type(ports) is not list:
+                ports = [p for p in ports.split(",") if p != ""]
+            return set(int(p) for p in ports)
+        if not port_set(value[2]) <= port_set(value[1]):
+            raise ValueError("Tagged ports must also be member ports")
+        members = self.pack_ports(value[1])
+        tagged = self.pack_ports(value[2])
+        rtn = struct.pack(">h%us%us" % (len(members), len(tagged)), int(value[0]), members, tagged)
         return rtn
 
     def unpack_cmd(self, value):
@@ -568,25 +784,22 @@ class PslTypVlan802Id(PslTypVlanId):
         return 3
 
     def get_metavar(self):
-        return ("VLAN_ID", "TAGGED_PORTS", "UNTAGGED_PORTS")
+        return ("VLAN_ID", "MEMBER_PORTS", "TAGGED_PORTS")
 
     def print_result(self, value):
-        print("%-30s%7s %14s %s" % (self.get_name().capitalize(), "VLAN_ID",
-                                      "Tagged-Ports","Untagged-Ports"))
-        if type(value) is list:
-            for row in value:
-                print("%-30s%7d %14s %s" % ("",
-                        int(row["vlan_id"]),
-                        ",".join([str(x) for x in row["tagged_ports"]]),
-                        ",".join([str(x) for x in row["untagged_ports"]])))
-        else:
-            print("%-30s%7d %14s %s" % ("",
-                        int(value["vlan_id"]),
-                        ",".join([str(x) for x in value["tagged_ports"]]),
-                        ",".join([str(x) for x in value["untagged_ports"]])))
-          
+        print("%-30s%7s %18s %18s" % (self.get_name().capitalize(), "VLAN_ID",
+                                      "Member ports","Tagged ports"))
 
-        
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
+        for row in value:
+            print("%-30s%7d %18s %18s" % ("",
+                    int(row["vlan_id"]),
+                    ",".join([str(x) for x in row["member_ports"]]),
+                    ",".join([str(x) for x in row["tagged_ports"]])))
+
 ################################################################################
 
 
@@ -629,6 +842,11 @@ class PslTypVlanPVID(PslTyp):
     def print_result(self, value):
         print("%-30s%4s %s" % (self.get_name().capitalize(), "Port",
                                       "VLAN_ID"))
+
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
         for row in value:
             print("%-30s%4d %7d" % ("",
                                         row["port"],
@@ -637,6 +855,37 @@ class PslTypVlanPVID(PslTyp):
 
     def get_set_help(self):
         return "an untagged package on PORT will get this VLAN_ID"
+
+
+################################################################################
+
+class PslTypDeleteVlan(PslTyp):
+    "Delete vlan"
+    def unpack_py(self, value):
+        return struct.unpack(">h", value)[0]
+
+    def pack_py(self, value):
+        rtn = struct.pack(">h", int(value))
+        return rtn
+
+    def pack_cmd(self, value):
+        return self.pack_py(value)
+
+    def unpack_cmd(self, value):
+        return self.unpack_py(value)
+
+    def is_queryable(self):
+        return False
+
+    def is_setable(self):
+        return True
+
+    def get_num_args(self):
+        return 1
+
+    def allow_multiple(self):
+        return True
+
 ################################################################################
 
 
@@ -644,7 +893,7 @@ class UnknownValueException(Exception):
     "Found something which I don't know"
 
 
-class PslTypQos(PslTyp):
+class PslTypQosMode(PslTyp):
     "Quality of service is port_based or 802.1p"
     def unpack_py(self, value):
         # Python 3 uses an array of bytes, Python 2 uses a string
@@ -657,7 +906,7 @@ class PslTypQos(PslTyp):
         if (val == 0x02):
             return "802.1p"
         return val
-        
+
     def pack_py(self, value):
         if (value == "802.1p"):
             return struct.pack(">B", 0x02)
@@ -667,19 +916,19 @@ class PslTypQos(PslTyp):
 
     def unpack_cmd(self, value):
         return self.unpack_py(value)
-       
+
     def is_setable(self):
         return True
-       
+
     def get_choices(self):
         return ["port_based","802.1p"]
-    
+
 ################################################################################
 
 
 class PslTypPortBasedQOS(PslTyp):
     "Port based quality of service"
-    
+
     QOS_PRIORITY = {
       0x01:"HIGH",
       0x02:"MIDDLE",
@@ -712,7 +961,7 @@ class PslTypPortBasedQOS(PslTyp):
 
     def unpack_cmd(self, value):
         return self.unpack_py(value)
-       
+
     def is_setable(self):
         return True
 
@@ -721,13 +970,18 @@ class PslTypPortBasedQOS(PslTyp):
 
     def get_metavar(self):
         return ("PORT","QOS")
-        
+
     def get_set_help(self):
         return "QOS can be HIGH, MIDDLE, NORMAL, or LOW"
 
     def print_result(self, value):
         print("%-30s%4s %s" % (self.get_name().capitalize(), "Port",
                                       "Priority"))
+
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
         for row in value:
             print("%-30s%4d %s" % ("",
                                    row["port"],
@@ -746,7 +1000,7 @@ class PslTypIGMPSnooping(PslTyp):
             # VLAN Id
             return struct.unpack(">h", value[2:])[0]
         raise UnknownValueException("Unknown value %d" % enabled)
-      
+
     def pack_py(self, value):
         if (value == "none"):
             return struct.pack(">hh", 0, 0)
@@ -754,10 +1008,10 @@ class PslTypIGMPSnooping(PslTyp):
 
     def unpack_cmd(self, value):
         return self.unpack_py(value)
-       
+
     def is_setable(self):
         return True
-       
+
 
 ################################################################################
 
@@ -820,12 +1074,30 @@ class PslTypPortMirror(PslTyp):
                  8: 0x01
                  }
 
+    # 8-port default until set_total_ports() is told the real count
+    total_ports = 8
+    num_port_bytes = 1
+
+    def set_total_ports(self, total_ports):
+        # Calculate number of bytes required to store bitmap of all ports
+        self.total_ports = total_ports
+        self.num_port_bytes = (total_ports + 7) // 8
+
     def unpack_py(self, value):
-        dst_port, fixme, src_ports = struct.unpack(">bbb", value)
+        dst_port, fixme = struct.unpack(">BB", value[:2])
+        # Remaining values are a bitmap of the source ports
+        src_port_list = value[2:]
         out_src_ports = []
-        for port in list(self.BIN_PORTS.keys()):
-            if (src_ports & self.BIN_PORTS[port] > 0):
-                out_src_ports.append(port)
+
+        base = 0
+
+        # Bytes are a bitmap of the source ports from left-to-right
+        # (so most-significant bit in the first byte is port 1)
+        for src_ports in struct.unpack("%uB" % len(src_port_list), src_port_list):
+            for port in list(self.BIN_PORTS.keys()):
+                if (src_ports & self.BIN_PORTS[port] > 0):
+                    out_src_ports.append(port + base)
+            base += 8
 
         if dst_port == 0:
             return "No Port Mirroring has been set up"
@@ -837,13 +1109,30 @@ class PslTypPortMirror(PslTyp):
         return rtn
 
     def pack_py(self, value):
-        if int(value[0]) == 0:
-            return struct.pack(">bbb", 0, 0, 0)
-        dst_ports = 0
-        for dport in value[1].split(","):
-            dst_ports += self.BIN_PORTS[int(dport)]
-        return struct.pack(">bbb", int(value[0]), 0, dst_ports)
-        
+        dst_port = int(value[0])
+        src_ports = [0] * self.num_port_bytes
+
+        if dst_port != 0:
+            if dst_port > self.total_ports:
+                raise ValueError("Destination port '{}' is out of range".format(dst_port))
+
+            port_list = value[1]
+
+            # Convert comma-separated values into a list
+            if type(port_list) is not list:
+                port_list = port_list.split(",")
+
+            for sport in port_list:
+                sport = int(sport)
+                idx = (sport - 1) // 8
+
+                if sport >= 1 and sport <= self.total_ports:
+                    src_ports[idx] |= self.BIN_PORTS[((sport - 1) % 8) + 1]
+                else:
+                    raise ValueError("Source port '{}' is out of range".format(sport))
+
+        return struct.pack(">BB%uB" % len(src_ports), dst_port, 0, *src_ports)
+
     def unpack_cmd(self, value):
         return self.unpack_py(value)
 
@@ -854,7 +1143,111 @@ class PslTypPortMirror(PslTyp):
         return 2
 
     def get_metavar(self):
-        return ("DST_PORTS","SRC_PORTS")
+        return ("DST_PORT","SRC_PORTS")
 
     def get_set_help(self):
-        return "SET DST_PORTS and SRC_PORTS to 0 to disable"
+        return "SET DST_PORT and SRC_PORTS to 0 to disable"
+
+################################################################################
+
+class PslTypCableTest(PslTyp):
+
+    def unpack_py(self, value):
+        port, fixme = struct.unpack(">bb", value)
+
+        rtn = {
+            "port": port,
+            "fixme": fixme,
+        }
+        return rtn
+
+    def pack_py(self, value):
+        return struct.pack(">BB", int(value), 1)
+
+    def is_queryable(self):
+        return False
+
+    def is_setable(self):
+        return True
+
+    def get_num_args(self):
+        return 1
+
+    def get_metavar(self):
+        return ("PORT")
+
+    def get_set_type(self):
+        return int
+
+################################################################################
+
+class PslTypCableTestResult(PslTyp):
+    "Cable test"
+    STATUS_OK            = 0x00
+    STATUS_NO_CABLE      = 0x01
+    STATUS_OPEN_CABLE    = 0x02
+    STATUS_SHORT_CIRCUIT = 0x03
+    STATUS_FIBRE_CABLE   = 0x04
+    STATUS_SHORTED_CABLE = 0x05
+    STATUS_UNKNOWN       = 0x06
+    STATUS_CROSSTALK     = 0x07
+
+    status_to_string = {
+        STATUS_OK: "OK",
+        STATUS_NO_CABLE: "No cable",
+        STATUS_OPEN_CABLE: "Open cable",
+        STATUS_SHORT_CIRCUIT: "Short circuit",
+        STATUS_FIBRE_CABLE: "Fibre cable",
+        STATUS_SHORTED_CABLE: "Shorted cable",
+        STATUS_UNKNOWN: "Unknown",
+        STATUS_CROSSTALK: "Crosstalk"
+        }
+
+    def unpack_py(self, value):
+        port, status, dist = struct.unpack(">BII", value)
+        rtn = {
+            "port": port,
+            "status": status,
+            "dist": dist
+        }
+        return rtn
+
+    def pack_py(self, value):
+        return binascii.unhexlify("{:02x}".format(value[0]))
+
+    def is_setable(self):
+        return False
+
+    def print_result(self, value):
+        print(("%-30s%4s%20s%19s" % ("Cable status:", "Port",
+                                   "Status", "Fault distance (m)")))
+
+        # Make sure we have a list of values (even if it's just a list of one)
+        if type(value) != list:
+            value = [value]
+
+        for row in value:
+            print(("%-30s%4d%20s%19u" % ("", row["port"], self.status_to_string[row["status"]], row["dist"])))
+
+
+    def unpack_cmd(self, value):
+        return self.unpack_py(value)
+
+################################################################################
+
+class PslTypSerialNum(PslTyp):
+    "switch's serial number"
+    def unpack_py(self, val):
+        values = struct.unpack("!B13sB6B", val)
+        one = values[0]     # Should be 1
+        zero = values[2]    # Should be zero (null-terminator?)
+        fixup = values[3]   # Six bytes (??)
+
+        return values[1].decode()
+
+    def unpack_cmd(self, value):
+        return self.unpack_py(value)
+
+    def is_setable(self):
+        return False
+

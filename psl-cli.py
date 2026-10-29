@@ -1,10 +1,10 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 "Main Program executed by the user"
 
 import argparse
 import sys
-from psl_class import ProSafeLinux
+from psl_class import ProSafeLinux, default_interface
 import psl_typ
 
 # pylint: disable=W0613
@@ -13,10 +13,12 @@ import psl_typ
 def discover(args, switch):
     "Search for Switches"
     print("Searching for ProSafe Plus Switches ...\n")
+    found = False
+
     for data in switch.discover():
         found = True
         for entry in data.keys():
-            print(entry.get_name() + ': ' + data[entry])
+            print(entry.get_name() + ': ' + str(data[entry]))
         print("")
 
     if not found:
@@ -28,9 +30,15 @@ def discover(args, switch):
 def exploit(args, switch):
     "exploit in current (2012) fw, can set a new password"
     switch.passwd_exploit(args.mac[0], args.new_password[0])
-    
+
 def set_switch(args, switch):
     "Set values on switch"
+    results = switch.query(switch.CMD_NUMBER_OF_PORTS, args.mac[0])
+    if results and switch.CMD_NUMBER_OF_PORTS in results:
+        switch.CMD_PORT_MIRROR.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
+        switch.CMD_VLAN_ID.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
+        switch.CMD_VLAN802_ID.set_total_ports(results[switch.CMD_NUMBER_OF_PORTS])
+
     cmds = {ProSafeLinux.CMD_PASSWORD: args.passwd[0]}
     for scmd in switch.get_setable_cmds():
         if vars(args)[scmd.get_name()] is not None:
@@ -41,7 +49,10 @@ def set_switch(args, switch):
                 if isinstance(scmd, psl_typ.PslTypBoolean):
                     cmds[scmd] = (vars(args)[scmd.get_name()][0] == "on")
                 else:
-                    if len(vars(args)[scmd.get_name()])==1:
+                    # options that may be given several times stay lists
+                    if (len(vars(args)[scmd.get_name()])==1 and
+                            scmd.get_num_args()==1 and
+                            not scmd.allow_multiple()):
                         cmds[scmd] = vars(args)[scmd.get_name()][0]
                     else:
                         cmds[scmd] = vars(args)[scmd.get_name()]
@@ -61,7 +72,10 @@ def query(args, switch, querycommand = None):
     "query values from the switch"
     if not(args.passwd == None):
         login = {switch.CMD_PASSWORD: args.passwd[0]}
-        switch.transmit(login, args.mac[0])
+        result = switch.transmit(login, args.mac[0])
+        if 'error' in result:
+            print("Login FAILED: " + str(result['error']))
+            return
     query_cmd = []
     if querycommand != None:
         query_cmd.append(querycommand)
@@ -81,6 +95,9 @@ def query(args, switch, querycommand = None):
     if switchdata != False:
         if switchdata == {}:
             print("%-29s empty data received" % (query_cmd[0].get_name()))
+        elif "error" in switchdata:
+            print("%-29s switch reported an error: %s" %
+                  (query_cmd[0].get_name(), switchdata["error"]))
         else:
             for key in list(switchdata.keys()):
                 if isinstance(key, psl_typ.PslTyp):
@@ -100,7 +117,10 @@ def query_raw(args, switch):
     print("QUERY DEBUG RAW")
     if not(args.passwd == None):
         login = {switch.CMD_PASSWORD: args.passwd[0]}
-        switch.transmit(login, args.mac[0])
+        result = switch.transmit(login, args.mac[0])
+        if 'error' in result:
+            print("Login FAILED: " + str(result['error']))
+            return
     i = 0x0001
     while (i < ProSafeLinux.CMD_END.get_id()):
         query_cmd = []
@@ -140,16 +160,19 @@ def main():
 
     switch = ProSafeLinux()
     parser = argparse.ArgumentParser(
-        description='Manage Netgear ProSafe Plus switches under Linux.')
-    parser.add_argument("--interface", nargs=1, help="Interface",
-        default=["eth0"])
+        description='Manage Netgear ProSafe Plus switches under Linux and macOS.')
+    parser.add_argument("--interface", nargs=1,
+        help="Interface (default: the one carrying the default route)")
     parser.add_argument("--debug", help="Debug output", action='store_true')
+    parser.add_argument("--allow-plaintext", action='store_true',
+        help="send the password in plaintext if the switch asks for it "
+             "(old firmware); anyone on the network can read it")
     parser.add_argument("--timeout", help="set timeout for switch commands",
                 default="0.1", type=float)
     subparsers = parser.add_subparsers(help='operation', dest="operation")
 
     subparsers.add_parser('discover', help='Find all switches in all subnets')
-    
+
     exploit_parser = subparsers.add_parser("exploit",
        help="set a password without knowing the old one")
     exploit_parser.add_argument("--mac", nargs=1,
@@ -166,7 +189,7 @@ def main():
     for cmd in switch.get_query_cmds():
         choices.append(cmd.get_name())
     choices.append("all")
-    
+
     query_parser.add_argument("query", nargs="+", help="What to query for",
         choices=choices)
 
@@ -188,20 +211,35 @@ def main():
                 dest=cmd.get_name(), action='store_true')
 
         else:
-            set_parser.add_argument("--" + cmd.get_name(), 
+            action = 'store'
+            if cmd.allow_multiple():
+                action = 'append'
+            set_parser.add_argument("--" + cmd.get_name(),
                 nargs=cmd.get_num_args(),
                 type=cmd.get_set_type(),
                 help=cmd.get_set_help(),
                 metavar=cmd.get_metavar(),
-                choices=cmd.get_choices())
+                choices=cmd.get_choices(),
+                action=action)
 
     args = parser.parse_args()
-    interface = args.interface[0]
+    if args.operation is None:
+        parser.print_help()
+        return
+    if args.interface is None:
+        interface = default_interface()
+        if interface is None:
+            print("No usable network interface found, use --interface")
+            return
+    else:
+        interface = args.interface[0]
 
     switch.set_timeout(args.timeout)
+    switch.allow_plaintext = args.allow_plaintext
 
     if not switch.bind(interface):
-        print("Interface has no addresses, cannot talk to switch")
+        print("Interface %s has no IPv4 or hardware address, "
+              "cannot talk to switch" % interface)
         return
 
     if (args.debug):
@@ -212,6 +250,7 @@ def main():
     else:
         print("ERROR: operation not found!")
 
-main()
+if __name__ == "__main__":
+    main()
 
 # vim:filetype=python:foldmethod=marker:autoindent:expandtab:tabstop=4

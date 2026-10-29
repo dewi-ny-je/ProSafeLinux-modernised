@@ -13,7 +13,7 @@ if [ -f $LOG ] ; then
     exit 1
 fi
 
-pylint psl.py -d $UNUSED_ARG >$LOG 2>&1
+pylint psl-cli.py -d $UNUSED_ARG >$LOG 2>&1
 
 M=$?
 
